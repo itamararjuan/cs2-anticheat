@@ -1,0 +1,5 @@
+{
+  "DetectionEnabled": true,
+  "DetectionAction": 1,
+  "AlertDiscord": true
+}
