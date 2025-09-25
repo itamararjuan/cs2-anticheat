@@ -9,6 +9,7 @@ namespace TBAntiCheat.Core
     {
         public ulong DiscordWebhookID { get; set; } = 0;
         public string DiscordWebhookToken { get; set; } = string.Empty;
+        public bool DiscordWebhookStartMessage { get; set; } = true;
     }
 
     internal static class GeneralConfig

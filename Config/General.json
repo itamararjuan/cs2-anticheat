@@ -1,4 +1,5 @@
 {
   "DiscordWebhookID": 0,
-  "DiscordWebhookToken": ""
+  "DiscordWebhookToken": "",
+  "DiscordWebhookStartMessage": true
 }

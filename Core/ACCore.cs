@@ -33,7 +33,6 @@ namespace TBAntiCheat.Core
 
             GeneralConfig.Initialize();
             DiscordIntegration.InitializeWebhook();
-            DiscordIntegration.SendWebhook("Server Started!");
 
             Globals.Log($"[TBAC] Loaded (v{ModuleVersion})");
         }

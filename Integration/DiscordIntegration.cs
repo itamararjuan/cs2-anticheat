@@ -31,8 +31,15 @@ namespace TBAntiCheat.Integration
             webClient = new HttpClient();
             webClientAddress = $"https://discordapp.com/api/webhooks/{id}/{token}";
 
-            webClientData = new WebhookData();
-            webClientData.username = "TB Anti-Cheat";
+            webClientData = new WebhookData
+            {
+                username = "TB Anti-Cheat"
+            };
+
+            if (GeneralConfig.GetGeneralConfig().Config.DiscordWebhookStartMessage == true)
+            {
+                SendWebhook("Server Started!"); //TODO: Include server name here
+            }
 
             return true;
         }
