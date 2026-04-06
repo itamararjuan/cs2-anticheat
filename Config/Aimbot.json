@@ -1,7 +1,5 @@
 {
   "DetectionEnabled": true,
-  "DetectionAction": 2,
-  "AlertDiscord": false,
   "MaxAimbotAngle": 30,
   "MaxDetectionsBeforeAction": 2
 }

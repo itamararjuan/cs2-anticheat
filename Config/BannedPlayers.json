@@ -1,3 +1,3 @@
 {
-  "Bans": []
+  "Deprecated": "Built-in ban persistence was removed in the telemetry-first fork."
 }

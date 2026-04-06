@@ -1,7 +1,7 @@
 ﻿using CounterStrikeSharp.API.Core.Attributes;
 using CounterStrikeSharp.API.Core;
 using TBAntiCheat.Handlers;
-using TBAntiCheat.Integration;
+using TBAntiCheat.Telemetry;
 
 namespace TBAntiCheat.Core
 {
@@ -23,16 +23,13 @@ namespace TBAntiCheat.Core
                 Globals.Initialize(hotReload);
             }
 
-            BanHandler.Initialize();
             CommandHandler.Initialize(this);
+            TelemetryManager.Initialize(this);
 
             EventListeners.Initialize(this);
             EventHandlers.Initialize(this, hotReload);
 
             UserMessagesHandler.Initialize(this);
-
-            GeneralConfig.Initialize();
-            DiscordIntegration.InitializeWebhook();
 
             Globals.Log($"[TBAC] Loaded (v{ModuleVersion})");
         }

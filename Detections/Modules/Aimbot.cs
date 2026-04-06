@@ -13,9 +13,6 @@ namespace TBAntiCheat.Detections.Modules
     public class AimbotSaveData
     {
         public bool DetectionEnabled { get; set; } = true;
-        public ActionType DetectionAction { get; set; } = ActionType.Kick;
-        public bool AlertDiscord { get; set; } = false;
-
         public float MaxAimbotAngle { get; set; } = 30f;
         public int MaxDetectionsBeforeAction { get; set; } = 2;
     }
@@ -41,8 +38,6 @@ namespace TBAntiCheat.Detections.Modules
     internal class Aimbot : BaseModule
     {
         internal override string Name => "Aimbot";
-        internal override ActionType ActionType => config.Config.DetectionAction;
-        internal override bool AlertDiscord => config.Config.AlertDiscord;
 
         private const int aimbotMaxHistory = 64; //1 entire second worth of history (considering the tickrate is 64)
 
@@ -55,7 +50,6 @@ namespace TBAntiCheat.Detections.Modules
             playerData = new PlayerAimbotData[Server.MaxPlayers];
 
             CommandHandler.RegisterCommand("tbac_aimbot_enable", "Activates/Deactivates the aimbot detection", OnEnableCommand);
-            CommandHandler.RegisterCommand("tbac_aimbot_action", "Which action to take on the player. 0 = none | 1 = log | 2 = kick | 3 = ban", OnActionCommand);
             CommandHandler.RegisterCommand("tbac_aimbot_angle", "Max angle in a single tick before detection", OnAngleCommand);
             CommandHandler.RegisterCommand("tbac_aimbot_detections", "Maximum detections before an action should be taken", OnDetectionsCommand);
 
@@ -113,8 +107,6 @@ namespace TBAntiCheat.Detections.Modules
                 {
                     angleDiff = MathF.Abs(angleDiff - 360);
                 }
-
-                //Server.PrintToChatAll($"{i}: {shooter.Controller.PlayerName} -> {angleDiff}");
 
                 if (angleDiff > maxAngle)
                 {
@@ -203,30 +195,6 @@ namespace TBAntiCheat.Detections.Modules
             }
 
             config.Config.DetectionEnabled = state;
-            config.Save();
-        }
-
-        [RequiresPermissions("@css/admin")]
-        private void OnActionCommand(CCSPlayerController? player, CommandInfo command)
-        {
-            if (command.ArgCount != 2)
-            {
-                return;
-            }
-
-            string arg = command.ArgByIndex(1);
-            if (int.TryParse(arg, out int action) == false)
-            {
-                return;
-            }
-
-            ActionType actionType = (ActionType)action;
-            if (config.Config.DetectionAction.HasFlag(actionType) == false)
-            {
-                return;
-            }
-
-            config.Config.DetectionAction = actionType;
             config.Save();
         }
 

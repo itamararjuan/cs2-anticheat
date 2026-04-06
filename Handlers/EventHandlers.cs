@@ -2,6 +2,7 @@
 using CounterStrikeSharp.API.Core;
 using TBAntiCheat.Core;
 using TBAntiCheat.Detections;
+using TBAntiCheat.Telemetry;
 
 namespace TBAntiCheat.Handlers
 {
@@ -12,15 +13,25 @@ namespace TBAntiCheat.Handlers
             plugin.RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
             plugin.RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect, HookMode.Pre);
             plugin.RegisterEventHandler<EventPlayerActivate>(OnPlayerActivate);
+            plugin.RegisterEventHandler<EventPlayerSpawned>(OnPlayerSpawned);
 
             plugin.RegisterEventHandler<EventPlayerJump>(OnPlayerJump);
             plugin.RegisterEventHandler<EventPlayerHurt>(OnPlayerHurt);
             plugin.RegisterEventHandler<EventPlayerDeath>(OnPlayerDeath);
+            plugin.RegisterEventHandler<EventPlayerBlind>(OnPlayerBlind);
 
             plugin.RegisterEventHandler<EventWeaponFire>(OnWeaponFire);
+            plugin.RegisterEventHandler<EventBulletImpact>(OnBulletImpact);
+            plugin.RegisterEventHandler<EventFlashbangDetonate>(OnFlashbangDetonate);
+            plugin.RegisterEventHandler<EventSmokegrenadeDetonate>(OnSmokegrenadeDetonate);
+            plugin.RegisterEventHandler<EventMolotovDetonate>(OnMolotovDetonate);
+            plugin.RegisterEventHandler<EventPlayerFootstep>(OnPlayerFootstep);
+            plugin.RegisterEventHandler<EventPlayerSound>(OnPlayerSound);
 
             plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
             plugin.RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
+            plugin.RegisterEventHandler<EventBombPlanted>(OnBombPlanted);
+            plugin.RegisterEventHandler<EventBombDefused>(OnBombDefused);
 
             Globals.Log($"[TBAC] EventHandlers Initialized");
 
@@ -77,6 +88,24 @@ namespace TBAntiCheat.Handlers
             return HookResult.Continue;
         }
 
+        private static HookResult OnPlayerSpawned(EventPlayerSpawned spawnEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(spawnEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            CCSPlayerPawn? pawn = spawnEvent.Userid?.PlayerPawn.Value;
+            if (pawn != null)
+            {
+                player.Pawn = pawn;
+            }
+
+            TelemetryManager.OnPlayerSpawned(player);
+            return HookResult.Continue;
+        }
+
         private static HookResult OnPlayerDisconnect(EventPlayerDisconnect disconnectEvent, GameEventInfo _)
         {
             OnPlayerLeft(disconnectEvent.Userid);
@@ -86,13 +115,12 @@ namespace TBAntiCheat.Handlers
 
         private static HookResult OnPlayerJump(EventPlayerJump jumpEvent, GameEventInfo _)
         {
-            CCSPlayerController? controller = jumpEvent.Userid;
-            if (controller == null || controller.IsValid == false)
+            PlayerData? player = TryGetTrackedPlayer(jumpEvent.Userid);
+            if (player == null)
             {
                 return HookResult.Continue;
             }
 
-            PlayerData player = Globals.Players[controller.Slot];
             BaseCaller.OnPlayerJump(player);
 
             return HookResult.Continue;
@@ -100,63 +128,157 @@ namespace TBAntiCheat.Handlers
 
         private static HookResult OnPlayerHurt(EventPlayerHurt hurtEvent, GameEventInfo _)
         {
-            CCSPlayerController? victimController = hurtEvent.Userid;
-            CCSPlayerController? shooterController = hurtEvent.Attacker;
-
-            if (victimController == null || victimController.IsValid == false ||
-                shooterController == null || shooterController.IsValid == false)
+            PlayerData? victim = TryGetTrackedPlayer(hurtEvent.Userid);
+            if (victim == null)
             {
                 return HookResult.Continue;
             }
 
-            PlayerData victim = Globals.Players[victimController.Slot];
-            PlayerData shooter = Globals.Players[shooterController.Slot];
+            PlayerData? shooter = TryGetTrackedPlayer(hurtEvent.Attacker);
 
-            BaseCaller.OnPlayerHurt(victim, shooter, (HitGroup_t)hurtEvent.Hitgroup);
+            TelemetryManager.OnPlayerHurt(victim, shooter, hurtEvent.DmgHealth, hurtEvent.Weapon, hurtEvent.Hitgroup);
+
+            if (shooter != null)
+            {
+                BaseCaller.OnPlayerHurt(victim, shooter, (HitGroup_t)hurtEvent.Hitgroup);
+            }
 
             return HookResult.Continue;
         }
 
         private static HookResult OnPlayerDeath(EventPlayerDeath deathEvent, GameEventInfo _)
         {
-            CCSPlayerController? victimController = deathEvent.Userid;
-            CCSPlayerController? shooterController = deathEvent.Attacker;
-
-            if (victimController == null || victimController.IsValid == false ||
-                shooterController == null || shooterController.IsValid == false)
+            PlayerData? victim = TryGetTrackedPlayer(deathEvent.Userid);
+            if (victim == null)
             {
                 return HookResult.Continue;
             }
 
-            PlayerData victim = Globals.Players[victimController.Slot];
-            PlayerData shooter = Globals.Players[shooterController.Slot];
+            PlayerData? shooter = TryGetTrackedPlayer(deathEvent.Attacker);
 
-            if (victim == null || shooter == null)
+            TelemetryManager.OnPlayerDeath(
+                victim,
+                shooter,
+                deathEvent.Weapon,
+                deathEvent.Headshot,
+                deathEvent.Thrusmoke,
+                deathEvent.Penetrated,
+                deathEvent.Attackerblind,
+                deathEvent.Noscope,
+                deathEvent.Attackerinair,
+                deathEvent.Distance
+            );
+
+            if (shooter != null)
             {
-                return HookResult.Continue;
+                BaseCaller.OnPlayerDead(victim, shooter);
             }
-
-            BaseCaller.OnPlayerDead(victim, shooter);
 
             return HookResult.Continue;
         }
 
         private static HookResult OnWeaponFire(EventWeaponFire shootEvent, GameEventInfo _)
         {
-            CCSPlayerController? controller = shootEvent.Userid;
-            if (controller == null || controller.IsValid == false)
+            PlayerData? shooter = TryGetTrackedPlayer(shootEvent.Userid);
+            if (shooter == null)
             {
                 return HookResult.Continue;
             }
 
-            PlayerData shooter = Globals.Players[controller.Slot];
+            TelemetryManager.OnWeaponFire(shooter, shooter.GetWeapon()?.DesignerName ?? string.Empty);
             BaseCaller.OnPlayerShoot(shooter);
 
             return HookResult.Continue;
         }
 
+        private static HookResult OnBulletImpact(EventBulletImpact impactEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(impactEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            TelemetryManager.OnBulletImpact(player);
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnPlayerBlind(EventPlayerBlind blindEvent, GameEventInfo _)
+        {
+            PlayerData? victim = TryGetTrackedPlayer(blindEvent.Userid);
+            if (victim == null)
+            {
+                return HookResult.Continue;
+            }
+
+            PlayerData? attacker = TryGetTrackedPlayer(blindEvent.Attacker);
+            TelemetryManager.OnPlayerBlind(victim, attacker, blindEvent.BlindDuration);
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnFlashbangDetonate(EventFlashbangDetonate flashEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(flashEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            TelemetryManager.OnFlashbangDetonate(player);
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnSmokegrenadeDetonate(EventSmokegrenadeDetonate smokeEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(smokeEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            TelemetryManager.OnSmokeDetonate(player);
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnMolotovDetonate(EventMolotovDetonate molotovEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(molotovEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            TelemetryManager.OnMolotovDetonate(player);
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnPlayerFootstep(EventPlayerFootstep footstepEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(footstepEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            TelemetryManager.OnPlayerFootstep(player);
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnPlayerSound(EventPlayerSound soundEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(soundEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            TelemetryManager.OnPlayerSound(player);
+            return HookResult.Continue;
+        }
+
         private static HookResult OnRoundStart(EventRoundStart roundStartEvent, GameEventInfo _)
         {
+            TelemetryManager.OnRoundStart();
             BaseCaller.OnRoundStart();
 
             return HookResult.Continue;
@@ -165,7 +287,32 @@ namespace TBAntiCheat.Handlers
         private static HookResult OnRoundEnd(EventRoundEnd roundEndEvent, GameEventInfo _)
         {
             BaseCaller.OnRoundEnd();
+            TelemetryManager.OnRoundEnd();
 
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnBombPlanted(EventBombPlanted bombPlantedEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(bombPlantedEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            TelemetryManager.OnBombPlanted(player);
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnBombDefused(EventBombDefused bombDefusedEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(bombDefusedEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            TelemetryManager.OnBombDefused(player);
             return HookResult.Continue;
         }
 
@@ -198,6 +345,7 @@ namespace TBAntiCheat.Handlers
 
             Globals.Players[playerIndex] = player;
             BaseCaller.OnPlayerJoin(player);
+            TelemetryManager.OnPlayerJoined(player);
 
             //Globals.Log($"[TBAC] Player joined -> {playerIndex} | {controller.PlayerName}");
         }
@@ -225,9 +373,26 @@ namespace TBAntiCheat.Handlers
             PlayerData player = Globals.Players[playerIndex];
 
             BaseCaller.OnPlayerLeave(player);
+            TelemetryManager.OnPlayerLeft(player);
             Globals.Players[playerIndex] = null!;
 
             //Globals.Log($"[TBAC] Player left -> {playerIndex} | {controller.PlayerName}");
+        }
+
+        private static PlayerData? TryGetTrackedPlayer(CCSPlayerController? controller)
+        {
+            if (controller == null || controller.IsValid == false)
+            {
+                return null;
+            }
+
+            PlayerData player = Globals.Players[controller.Slot];
+            if (player == null)
+            {
+                return null;
+            }
+
+            return player;
         }
     }
 }

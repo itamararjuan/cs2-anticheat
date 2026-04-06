@@ -1,0 +1,15 @@
+{
+  "CollectionEnabled": true,
+  "UploadEnabled": false,
+  "ServerId": "",
+  "ServerLabel": "",
+  "ServerRegion": "",
+  "MatchSource": "",
+  "MatchId": "",
+  "BaseUrl": "https://www.ouro.is/edge/",
+  "RelativePath": "/api/cs2/observations",
+  "BearerToken": "",
+  "ReportingIntervalSeconds": 30,
+  "LogBatchSummaries": true,
+  "LogObservationSummaries": false
+}

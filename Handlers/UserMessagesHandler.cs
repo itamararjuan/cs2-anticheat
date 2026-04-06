@@ -1,5 +1,4 @@
-﻿using CounterStrikeSharp.API;
-using CounterStrikeSharp.API.Core;
+﻿using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.UserMessages;
 using TBAntiCheat.Core;
 
@@ -19,7 +18,7 @@ namespace TBAntiCheat.Handlers
             string angles = msg.ReadString("angles");
             int player = msg.ReadInt("player");
 
-            Server.PrintToChatAll($"Player -> {player} | Angles -> {angles}");
+            Globals.Log($"[TBAC] FireBullets user message observed -> player: {player} | angles: {angles}");
 
             return HookResult.Continue;
         }

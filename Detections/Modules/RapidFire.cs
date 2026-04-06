@@ -10,9 +10,6 @@ namespace TBAntiCheat.Detections.Modules
     public class RapidFireSaveData
     {
         public bool DetectionEnabled { get; set; } = true;
-        public ActionType DetectionAction { get; set; } = ActionType.Kick;
-        public bool AlertDiscord { get; set; } = false;
-
         public int MaxDetectionsBeforeAction { get; set; } = 5;
     }
 
@@ -30,8 +27,6 @@ namespace TBAntiCheat.Detections.Modules
     internal class RapidFire : BaseModule
     {
         internal override string Name => "RapidFire";
-        internal override ActionType ActionType => config.Config.DetectionAction;
-        internal override bool AlertDiscord => config.Config.AlertDiscord;
 
         private readonly BaseConfig<RapidFireSaveData> config;
         private readonly RapidFireData[] playerData;
@@ -42,7 +37,6 @@ namespace TBAntiCheat.Detections.Modules
             playerData = new RapidFireData[Server.MaxPlayers];
 
             CommandHandler.RegisterCommand("tbac_rapidfire_enable", "Deactivates/Activates RapidFire detections", OnEnableCommand);
-            CommandHandler.RegisterCommand("tbac_rapidfire_action", "Which action to take on the player. 0 = none | 1 = log | 2 = kick | 3 = ban", OnActionCommand);
 
             Globals.Log($"[TBAC] RapidFire Initialized");
         }
@@ -146,28 +140,5 @@ namespace TBAntiCheat.Detections.Modules
             config.Save();
         }
 
-        [RequiresPermissions("@css/admin")]
-        private void OnActionCommand(CCSPlayerController? player, CommandInfo command)
-        {
-            if (command.ArgCount != 2)
-            {
-                return;
-            }
-
-            string arg = command.ArgByIndex(1);
-            if (int.TryParse(arg, out int action) == false)
-            {
-                return;
-            }
-
-            ActionType actionType = (ActionType)action;
-            if (config.Config.DetectionAction.HasFlag(actionType) == false)
-            {
-                return;
-            }
-
-            config.Config.DetectionAction = actionType;
-            config.Save();
-        }
     }
 }

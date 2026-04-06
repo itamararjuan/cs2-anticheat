@@ -1,6 +1,7 @@
 ﻿using CounterStrikeSharp.API.Core;
 using TBAntiCheat.Core;
 using TBAntiCheat.Detections;
+using TBAntiCheat.Telemetry;
 
 namespace TBAntiCheat.Handlers
 {
@@ -18,13 +19,18 @@ namespace TBAntiCheat.Handlers
         private static void OnMapStart(string mapName)
         {
             Globals.Initialize(false);
+            TelemetryManager.OnMapStart(mapName);
         }
 
-        private static void OnMapEnd() { }
+        private static void OnMapEnd()
+        {
+            TelemetryManager.OnMapEnd();
+        }
 
         private static void OnGameTick()
         {
             BaseCaller.OnGameTick();
+            TelemetryManager.OnGameTick();
 
             foreach (PlayerData player in Globals.Players)
             {

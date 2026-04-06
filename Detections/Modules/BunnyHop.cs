@@ -10,8 +10,6 @@ namespace TBAntiCheat.Detections.Modules
     public class BunnyHopSaveData
     {
         public bool DetectionEnabled { get; set; } = true;
-        public ActionType DetectionAction { get; set; } = ActionType.Log;
-        public bool AlertDiscord { get; set; } = false;
     }
 
     internal class BunnyHopData
@@ -27,8 +25,6 @@ namespace TBAntiCheat.Detections.Modules
     internal class BunnyHop : BaseModule
     {
         internal override string Name => "BunnyHop";
-        internal override ActionType ActionType => config.Config.DetectionAction;
-        internal override bool AlertDiscord => config.Config.AlertDiscord;
 
         private readonly BaseConfig<BunnyHopSaveData> config;
         private readonly BunnyHopData[] playerData;
@@ -39,7 +35,6 @@ namespace TBAntiCheat.Detections.Modules
             playerData = new BunnyHopData[Server.MaxPlayers];
 
             CommandHandler.RegisterCommand("tbac_bhop_enable", "Deactivates/Activates BunnyHop detections", OnEnableCommand);
-            CommandHandler.RegisterCommand("tbac_bhop_action", "Which action to take on the player. 0 = none | 1 = log | 2 = kick | 3 = ban", OnActionCommand);
 
             Globals.Log($"[TBAC] BunnyHop Initialized");
         }
@@ -59,7 +54,6 @@ namespace TBAntiCheat.Detections.Modules
 
         /*internal override void OnPlayerJump(PlayerData player)
         {
-            //Server.PrintToChatAll($"{player.Controller.PlayerName} -> Jumped");
         }
 
         internal override void OnPlayerTick(PlayerData player)
@@ -69,7 +63,6 @@ namespace TBAntiCheat.Detections.Modules
             PlayerButtons buttons = player.Controller.Buttons;
             if (buttons.HasFlag(PlayerButtons.Jump) == true)
             {
-                //Server.PrintToChatAll($"{player.Controller.PlayerName} -> Jumped");
             }
         }*/
 
@@ -93,28 +86,5 @@ namespace TBAntiCheat.Detections.Modules
             config.Save();
         }
 
-        [RequiresPermissions("@css/admin")]
-        private void OnActionCommand(CCSPlayerController? player, CommandInfo command)
-        {
-            if (command.ArgCount != 2)
-            {
-                return;
-            }
-
-            string arg = command.ArgByIndex(1);
-            if (int.TryParse(arg, out int action) == false)
-            {
-                return;
-            }
-
-            ActionType actionType = (ActionType)action;
-            if (config.Config.DetectionAction.HasFlag(actionType) == false)
-            {
-                return;
-            }
-
-            config.Config.DetectionAction = actionType;
-            config.Save();
-        }
     }
 }

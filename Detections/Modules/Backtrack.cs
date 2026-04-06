@@ -9,8 +9,6 @@
     internal class Backtrack : BaseModule
     {
         internal override string Name => "Backtrack";
-        internal override ActionType ActionType => ActionType.Log;
-        internal override bool AlertDiscord => false;
 
         internal Backtrack() : base() { }
     }

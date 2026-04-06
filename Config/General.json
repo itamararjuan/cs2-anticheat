@@ -1,5 +1,3 @@
 {
-  "DiscordWebhookID": 0,
-  "DiscordWebhookToken": "",
-  "DiscordWebhookStartMessage": true
+  "Deprecated": "Discord webhook configuration was removed in the telemetry-first fork. Use Telemetry.json instead."
 }

@@ -1,6 +1,4 @@
 {
   "DetectionEnabled": true,
-  "DetectionAction": 2,
-  "AlertDiscord": false,
   "MaxDetectionsBeforeAction": 5
 }
