@@ -30,6 +30,11 @@ namespace TBAntiCheat.Handlers
 
             plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
             plugin.RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
+            plugin.RegisterEventHandler<EventRoundFreezeEnd>(OnRoundFreezeEnd);
+            plugin.RegisterEventHandler<EventBuytimeEnded>(OnBuytimeEnded);
+            plugin.RegisterEventHandler<EventItemPurchase>(OnItemPurchase);
+            plugin.RegisterEventHandler<EventEnterBuyzone>(OnEnterBuyzone);
+            plugin.RegisterEventHandler<EventExitBuyzone>(OnExitBuyzone);
             plugin.RegisterEventHandler<EventBombPlanted>(OnBombPlanted);
             plugin.RegisterEventHandler<EventBombDefused>(OnBombDefused);
 
@@ -289,6 +294,54 @@ namespace TBAntiCheat.Handlers
             BaseCaller.OnRoundEnd();
             TelemetryManager.OnRoundEnd();
 
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnRoundFreezeEnd(EventRoundFreezeEnd _, GameEventInfo __)
+        {
+            TelemetryManager.OnRoundFreezeEnd();
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnBuytimeEnded(EventBuytimeEnded _, GameEventInfo __)
+        {
+            TelemetryManager.OnBuytimeEnded();
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnItemPurchase(EventItemPurchase purchaseEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(purchaseEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            TelemetryManager.OnItemPurchase(player, purchaseEvent.Weapon, purchaseEvent.Loadout, purchaseEvent.Team);
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnEnterBuyzone(EventEnterBuyzone buyzoneEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(buyzoneEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            TelemetryManager.OnEnterBuyzone(player);
+            return HookResult.Continue;
+        }
+
+        private static HookResult OnExitBuyzone(EventExitBuyzone buyzoneEvent, GameEventInfo _)
+        {
+            PlayerData? player = TryGetTrackedPlayer(buyzoneEvent.Userid);
+            if (player == null)
+            {
+                return HookResult.Continue;
+            }
+
+            TelemetryManager.OnExitBuyzone(player);
             return HookResult.Continue;
         }
 

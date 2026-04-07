@@ -17,10 +17,17 @@ namespace TBAntiCheat.Core
 
         internal string PlayerName => Controller.PlayerName;
         internal string SteamID => Controller.AuthorizedSteamID?.SteamId2 ?? "Invalid SteamID";
+        internal int TeamNumber => Controller.IsValid ? Controller.TeamNum : 0;
 
         internal CCSWeaponBaseGun GetWeapon()
         {
-            CPlayer_WeaponServices? weaponServices = Pawn.WeaponServices;
+            CCSPlayerPawn? pawn = GetCurrentPawn();
+            if (pawn == null)
+            {
+                return null!;
+            }
+
+            CPlayer_WeaponServices? weaponServices = pawn.WeaponServices;
             if (weaponServices == null)
             {
                 return null!;
@@ -33,6 +40,78 @@ namespace TBAntiCheat.Core
             }
 
             return new CCSWeaponBaseGun(weaponBase.Handle);
+        }
+
+        internal CCSPlayerPawn? GetCurrentPawn()
+        {
+            try
+            {
+                if (Pawn != null && Pawn.IsValid)
+                {
+                    return Pawn;
+                }
+
+                CCSPlayerPawn? livePawn = Controller?.PlayerPawn.Value;
+                if (livePawn != null && livePawn.IsValid)
+                {
+                    Pawn = livePawn;
+                    return livePawn;
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        internal CCSPlayerController_InGameMoneyServices? GetMoneyServices()
+        {
+            try
+            {
+                if (Controller == null || Controller.IsValid == false)
+                {
+                    return null;
+                }
+
+                return Controller.InGameMoneyServices;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        internal List<string> GetInventoryItems()
+        {
+            List<string> items = [];
+
+            try
+            {
+                CCSPlayerPawn? pawn = GetCurrentPawn();
+                CPlayer_WeaponServices? weaponServices = pawn?.WeaponServices;
+                if (weaponServices == null)
+                {
+                    return items;
+                }
+
+                foreach (CHandle<CBasePlayerWeapon> handle in weaponServices.MyWeapons)
+                {
+                    CBasePlayerWeapon? weapon = handle.Value;
+                    if (weapon == null || weapon.IsValid == false || string.IsNullOrWhiteSpace(weapon.DesignerName))
+                    {
+                        continue;
+                    }
+
+                    items.Add(weapon.DesignerName);
+                }
+            }
+            catch
+            {
+                return [];
+            }
+
+            return items;
         }
 
         internal void Disconnect(NetworkDisconnectionReason reason)

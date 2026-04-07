@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using CounterStrikeSharp.API;
+using CounterStrikeSharp.API.Core;
 using TBAntiCheat.Core;
 
 namespace TBAntiCheat.Telemetry
@@ -62,6 +63,10 @@ namespace TBAntiCheat.Telemetry
         internal int LastUtilityProfileObservationBucket { get; set; }
         internal int LastBlindKillObservationCount { get; set; }
         internal int LastZeroUtilityObservationKillCount { get; set; }
+        internal int LastKnownMoneyAccount { get; set; } = -1;
+        internal int LastKnownCashSpentThisRound { get; set; } = -1;
+        internal int LastKnownTotalCashSpent { get; set; } = -1;
+        internal int LastKnownEconomyRoundNumber { get; set; } = -1;
         internal Dictionary<string, int> LastWeaponFocusObservationCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
         internal DateTime BlindUntilUtc { get; set; } = DateTime.MinValue;
         internal Queue<DateTime> RecentKills { get; } = new();
@@ -153,6 +158,19 @@ namespace TBAntiCheat.Telemetry
         }
     }
 
+    internal sealed class LiveEconomySample
+    {
+        internal required string SteamID { get; init; }
+        internal required string PlayerName { get; init; }
+        internal required int Slot { get; init; }
+        internal required int Team { get; init; }
+        internal required int Account { get; init; }
+        internal required int StartAccount { get; init; }
+        internal required int CashSpentThisRound { get; init; }
+        internal required int TotalCashSpent { get; init; }
+        internal required List<string> InventoryItems { get; init; }
+    }
+
     internal static class TelemetryManager
     {
         private static readonly JsonSerializerOptions jsonOptions = new JsonSerializerOptions()
@@ -162,6 +180,8 @@ namespace TBAntiCheat.Telemetry
 
         private static readonly HttpClient httpClient = new HttpClient();
         private static readonly List<ObservationRecord> pendingObservations = [];
+        private static readonly List<EconomyEvent> pendingEconomyEvents = [];
+        private static readonly List<EconomySnapshot> pendingEconomySnapshots = [];
 
         private static PlayerTelemetryState[] playerStates = [];
         private static ACCore? plugin;
@@ -214,6 +234,7 @@ namespace TBAntiCheat.Telemetry
 
         internal static void OnRoundEnd()
         {
+            CaptureEconomySnapshots("round_end");
             Flush("round_end", force: false);
         }
 
@@ -253,6 +274,70 @@ namespace TBAntiCheat.Telemetry
 
             PlayerTelemetryState state = GetOrCreateState(player);
             state.RoundsPlayed++;
+        }
+
+        internal static void OnItemPurchase(PlayerData player, string item, int loadout, int team)
+        {
+            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            {
+                return;
+            }
+
+            if (TryBuildLiveEconomySample(player, out LiveEconomySample? sample) == false || sample == null)
+            {
+                return;
+            }
+
+            PlayerTelemetryState state = GetOrCreateState(player);
+            int moneySpentSinceLastRead =
+                state.LastKnownEconomyRoundNumber == roundNumber &&
+                state.LastKnownCashSpentThisRound >= 0 &&
+                sample.CashSpentThisRound >= state.LastKnownCashSpentThisRound
+                    ? sample.CashSpentThisRound - state.LastKnownCashSpentThisRound
+                    : sample.CashSpentThisRound;
+            int moneyAfter = Math.Max(0, sample.Account);
+            int moneyBefore = Math.Max(moneyAfter, moneyAfter + Math.Max(0, moneySpentSinceLastRead));
+            string normalizedItem = NormalizeEconomyItemName(item);
+
+            pendingEconomyEvents.Add(new EconomyEvent()
+            {
+                SteamID = state.SteamID,
+                PlayerName = state.PlayerName,
+                Slot = state.Slot,
+                Team = team,
+                EventType = "purchase",
+                Item = normalizedItem,
+                Loadout = loadout,
+                RoundNumber = roundNumber,
+                ServerTick = Server.TickCount,
+                ObservedAtUtc = DateTime.UtcNow,
+                MoneyBefore = moneyBefore,
+                MoneyAfter = moneyAfter,
+                CashSpentThisRound = sample.CashSpentThisRound,
+                StartAccount = sample.StartAccount
+            });
+
+            UpdateEconomyBaseline(state, sample);
+        }
+
+        internal static void OnEnterBuyzone(PlayerData player)
+        {
+            CaptureEconomySnapshots("enter_buyzone", player);
+        }
+
+        internal static void OnExitBuyzone(PlayerData player)
+        {
+            CaptureEconomySnapshots("exit_buyzone", player);
+        }
+
+        internal static void OnBuytimeEnded()
+        {
+            CaptureEconomySnapshots("buytime_ended");
+        }
+
+        internal static void OnRoundFreezeEnd()
+        {
+            CaptureEconomySnapshots("round_freeze_end");
         }
 
         internal static void OnWeaponFire(PlayerData player, string weapon)
@@ -628,11 +713,13 @@ namespace TBAntiCheat.Telemetry
             }
 
             pendingObservations.Clear();
+            pendingEconomyEvents.Clear();
+            pendingEconomySnapshots.Clear();
             lastFlushUtc = nowUtc;
 
             if (config.LogBatchSummaries)
             {
-                Globals.Log($"[TBAC] Telemetry batch #{batch.BatchSequence} ({reason}) -> players: {batch.Players.Count}, observations: {batch.Observations.Count}");
+                Globals.Log($"[TBAC] Telemetry batch #{batch.BatchSequence} ({reason}) -> players: {batch.Players.Count}, observations: {batch.Observations.Count}, economyEvents: {batch.EconomyEvents.Count}, economySnapshots: {batch.EconomySnapshots.Count}");
             }
 
             if (config.UploadEnabled == false)
@@ -707,6 +794,18 @@ namespace TBAntiCheat.Telemetry
                 observations.Add(observation);
             }
 
+            List<EconomyEvent> economyEvents = [];
+            foreach (EconomyEvent economyEvent in pendingEconomyEvents)
+            {
+                economyEvents.Add(economyEvent);
+            }
+
+            List<EconomySnapshot> economySnapshots = [];
+            foreach (EconomySnapshot economySnapshot in pendingEconomySnapshots)
+            {
+                economySnapshots.Add(economySnapshot);
+            }
+
             return new TelemetryBatch()
             {
                 PluginVersion = plugin?.ModuleVersion ?? string.Empty,
@@ -724,7 +823,9 @@ namespace TBAntiCheat.Telemetry
                 BombDefuses = bombDefuses,
                 GeneratedAtUtc = DateTime.UtcNow,
                 Players = players,
-                Observations = observations
+                Observations = observations,
+                EconomyEvents = economyEvents,
+                EconomySnapshots = economySnapshots
             };
         }
 
@@ -732,6 +833,8 @@ namespace TBAntiCheat.Telemetry
         {
             playerStates = [];
             pendingObservations.Clear();
+            pendingEconomyEvents.Clear();
+            pendingEconomySnapshots.Clear();
             currentMap = mapName;
             roundNumber = 0;
             bombPlants = 0;
@@ -759,6 +862,106 @@ namespace TBAntiCheat.Telemetry
             existing.PlayerName = player.PlayerName;
 
             return existing;
+        }
+
+        private static void CaptureEconomySnapshots(string snapshotKind, PlayerData? player = null)
+        {
+            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            {
+                return;
+            }
+
+            if (player != null)
+            {
+                RecordEconomySnapshot(player, snapshotKind);
+                return;
+            }
+
+            foreach (PlayerData? trackedPlayer in Globals.Players)
+            {
+                if (trackedPlayer == null)
+                {
+                    continue;
+                }
+
+                RecordEconomySnapshot(trackedPlayer, snapshotKind);
+            }
+        }
+
+        private static void RecordEconomySnapshot(PlayerData player, string snapshotKind)
+        {
+            if (TryBuildLiveEconomySample(player, out LiveEconomySample? sample) == false || sample == null)
+            {
+                return;
+            }
+
+            PlayerTelemetryState state = GetOrCreateState(player);
+            pendingEconomySnapshots.Add(new EconomySnapshot()
+            {
+                SteamID = state.SteamID,
+                PlayerName = state.PlayerName,
+                Slot = state.Slot,
+                Team = sample.Team,
+                SnapshotKind = snapshotKind,
+                RoundNumber = roundNumber,
+                ServerTick = Server.TickCount,
+                ObservedAtUtc = DateTime.UtcNow,
+                Money = sample.Account,
+                StartAccount = sample.StartAccount,
+                CashSpentThisRound = sample.CashSpentThisRound,
+                TotalCashSpent = sample.TotalCashSpent,
+                InventoryItems = sample.InventoryItems
+            });
+
+            UpdateEconomyBaseline(state, sample);
+        }
+
+        private static bool TryBuildLiveEconomySample(PlayerData player, out LiveEconomySample? sample)
+        {
+            sample = null;
+
+            CCSPlayerController_InGameMoneyServices? moneyServices = player.GetMoneyServices();
+            if (moneyServices == null)
+            {
+                return false;
+            }
+
+            List<string> inventoryItems = [];
+            foreach (string item in player.GetInventoryItems())
+            {
+                string normalizedItem = NormalizeWeaponName(item);
+                if (string.IsNullOrEmpty(normalizedItem))
+                {
+                    continue;
+                }
+
+                inventoryItems.Add(normalizedItem);
+            }
+
+            inventoryItems.Sort(StringComparer.Ordinal);
+
+            sample = new LiveEconomySample()
+            {
+                SteamID = player.SteamID,
+                PlayerName = player.PlayerName,
+                Slot = player.Index,
+                Team = player.TeamNumber,
+                Account = Math.Max(0, moneyServices.Account),
+                StartAccount = Math.Max(0, moneyServices.StartAccount),
+                CashSpentThisRound = Math.Max(0, moneyServices.CashSpentThisRound),
+                TotalCashSpent = Math.Max(0, moneyServices.TotalCashSpent),
+                InventoryItems = inventoryItems
+            };
+
+            return true;
+        }
+
+        private static void UpdateEconomyBaseline(PlayerTelemetryState state, LiveEconomySample sample)
+        {
+            state.LastKnownMoneyAccount = sample.Account;
+            state.LastKnownCashSpentThisRound = sample.CashSpentThisRound;
+            state.LastKnownTotalCashSpent = sample.TotalCashSpent;
+            state.LastKnownEconomyRoundNumber = roundNumber;
         }
 
         private static void EnsureStateCapacity(int playerIndex)
@@ -1013,6 +1216,26 @@ namespace TBAntiCheat.Telemetry
                 "molotov" => normalized,
                 "hegrenade" => "weapon_hegrenade",
                 _ => $"weapon_{normalized}"
+            };
+        }
+
+        internal static string NormalizeEconomyItemName(string item)
+        {
+            if (string.IsNullOrWhiteSpace(item))
+            {
+                return string.Empty;
+            }
+
+            string normalized = item.Trim().ToLowerInvariant();
+            if (normalized.StartsWith("weapon_", StringComparison.Ordinal) || normalized.StartsWith("item_", StringComparison.Ordinal))
+            {
+                return normalized;
+            }
+
+            return normalized switch
+            {
+                "vest" or "vesthelm" or "defuser" => $"item_{normalized}",
+                _ => NormalizeWeaponName(normalized)
             };
         }
 

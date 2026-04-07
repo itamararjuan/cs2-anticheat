@@ -52,6 +52,13 @@ flowchart TD
 - utility-damage milestones that may be useful for later scoring
 - zero-utility kill profiles for players who accumulate kills without any meaningful utility participation
 
+### Economy telemetry
+- explicit purchase rows from `EventItemPurchase`
+- explicit snapshots from `round_freeze_end`, `enter_buyzone`, `exit_buyzone`, `buytime_ended`, and `round_end`
+- money fields from `InGameMoneyServices` such as `Account`, `StartAccount`, `CashSpentThisRound`, and `TotalCashSpent`
+- inventory snapshots from `WeaponServices.MyWeapons`
+- sell/refund/rebuy inference deferred to `ouro-edge`; the plugin only emits the ledger rows and snapshots needed to derive those later
+
 ### Audio context
 - player footstep counts
 - player sound counts
@@ -77,4 +84,4 @@ The plugin must remain invisible to normal players:
 - MatchZy-specific match identifiers and match-state joins
 - higher-confidence positional or visibility modeling for wallhack scoring
 - persistent retry queues for failed uploads
-- finalized `ouro-edge` route and auth contract
+- first-class sell/refund/rebuy events unless CounterStrikeSharp exposes a reliable hook later

@@ -32,6 +32,8 @@ The plugin currently collects and batches:
 - round and map context
 - shots, hits, damage, kills, deaths, headshots
 - flash, smoke, molotov, and utility-damage metrics
+- direct economy purchase events
+- buy-phase and round-boundary economy snapshots with money and inventory
 - suspicious kill context such as smoke kills, wallbangs, flashed kills, and multi-kill bursts
 - weapon-level counters so downstream services can score unusual weapon usage patterns
 - profile observations such as zero-utility rounds, blind-kill profiles, pistol-heavy profiles, and revolver/scout concentration
@@ -70,6 +72,11 @@ Production telemetry uploads use:
 - `BearerToken` for `Authorization: Bearer <token>`
 
 The plugin sends player and observation `SteamID` values in each batch. `ouro-edge` resolves those SteamIDs to Ouro users and their active match context during ingestion so downstream analytics can reason about both the player and the match.
+
+Economy telemetry is sent inline in the same batch:
+- `EconomyEvents[]` contains explicit purchase rows from `item_purchase`
+- `EconomySnapshots[]` contains explicit money and inventory snapshots from buy-phase and round-boundary hooks
+- sell/refund/rebuy flows are not first-class plugin events in V1; those are inferred later on `ouro-edge`
 
 The checked-in `Config/` folder contains example files that mirror the runtime config shape.
 

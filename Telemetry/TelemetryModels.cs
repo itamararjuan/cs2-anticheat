@@ -60,6 +60,41 @@ namespace TBAntiCheat.Telemetry
         public Dictionary<string, string> Metadata { get; set; } = [];
     }
 
+    internal sealed class EconomyEvent
+    {
+        public string SteamID { get; set; } = string.Empty;
+        public string PlayerName { get; set; } = string.Empty;
+        public int Slot { get; set; }
+        public int Team { get; set; }
+        public string EventType { get; set; } = string.Empty;
+        public string Item { get; set; } = string.Empty;
+        public int Loadout { get; set; }
+        public int RoundNumber { get; set; }
+        public int ServerTick { get; set; }
+        public DateTime ObservedAtUtc { get; set; }
+        public int MoneyBefore { get; set; }
+        public int MoneyAfter { get; set; }
+        public int CashSpentThisRound { get; set; }
+        public int StartAccount { get; set; }
+    }
+
+    internal sealed class EconomySnapshot
+    {
+        public string SteamID { get; set; } = string.Empty;
+        public string PlayerName { get; set; } = string.Empty;
+        public int Slot { get; set; }
+        public int Team { get; set; }
+        public string SnapshotKind { get; set; } = string.Empty;
+        public int RoundNumber { get; set; }
+        public int ServerTick { get; set; }
+        public DateTime ObservedAtUtc { get; set; }
+        public int Money { get; set; }
+        public int StartAccount { get; set; }
+        public int CashSpentThisRound { get; set; }
+        public int TotalCashSpent { get; set; }
+        public List<string> InventoryItems { get; set; } = [];
+    }
+
     internal sealed class TelemetryBatch
     {
         public string PluginName { get; set; } = "TB Anti-Cheat";
@@ -79,8 +114,14 @@ namespace TBAntiCheat.Telemetry
         public DateTime GeneratedAtUtc { get; set; }
         public List<PlayerTelemetrySnapshot> Players { get; set; } = [];
         public List<ObservationRecord> Observations { get; set; } = [];
+        public List<EconomyEvent> EconomyEvents { get; set; } = [];
+        public List<EconomySnapshot> EconomySnapshots { get; set; } = [];
 
         [JsonIgnore]
-        public bool IsEmpty => Players.Count == 0 && Observations.Count == 0;
+        public bool IsEmpty =>
+            Players.Count == 0 &&
+            Observations.Count == 0 &&
+            EconomyEvents.Count == 0 &&
+            EconomySnapshots.Count == 0;
     }
 }
