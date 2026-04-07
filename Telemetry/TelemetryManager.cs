@@ -730,7 +730,7 @@ namespace TBAntiCheat.Telemetry
 
         private static void ResetState(string mapName)
         {
-            playerStates = new PlayerTelemetryState[Server.MaxPlayers];
+            playerStates = [];
             pendingObservations.Clear();
             currentMap = mapName;
             roundNumber = 0;
@@ -742,6 +742,7 @@ namespace TBAntiCheat.Telemetry
 
         private static PlayerTelemetryState GetOrCreateState(PlayerData player)
         {
+            EnsureStateCapacity(player.Index);
             PlayerTelemetryState? existing = playerStates[player.Index];
             if (existing == null)
             {
@@ -758,6 +759,21 @@ namespace TBAntiCheat.Telemetry
             existing.PlayerName = player.PlayerName;
 
             return existing;
+        }
+
+        private static void EnsureStateCapacity(int playerIndex)
+        {
+            if (playerIndex < 0)
+            {
+                return;
+            }
+
+            if (playerStates.Length > playerIndex)
+            {
+                return;
+            }
+
+            Array.Resize(ref playerStates, playerIndex + 1);
         }
 
         private static void RecordObservation(PlayerData player, string source, string kind, string summary, string weapon = "", DateTime? observedAtUtc = null, Dictionary<string, string>? metadata = null)
