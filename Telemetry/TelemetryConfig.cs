@@ -18,7 +18,7 @@ namespace TBAntiCheat.Telemetry
         public string BaseUrl { get; set; } = "https://www.ouro.is/edge/";
         public string RelativePath { get; set; } = "/api/cs2/observations";
         public string BearerToken { get; set; } = string.Empty;
-        public int ReportingIntervalSeconds { get; set; } = 30;
+        public int ReportingIntervalSeconds { get; set; } = 120;
         public bool LogBatchSummaries { get; set; } = true;
         public bool LogObservationSummaries { get; set; } = false;
     }

@@ -292,7 +292,7 @@ namespace TBAntiCheat.Handlers
         private static HookResult OnRoundEnd(EventRoundEnd roundEndEvent, GameEventInfo _)
         {
             BaseCaller.OnRoundEnd();
-            TelemetryManager.OnRoundEnd();
+            TelemetryManager.OnRoundEnd(roundEndEvent.Winner);
 
             return HookResult.Continue;
         }

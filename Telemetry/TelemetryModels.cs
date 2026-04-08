@@ -60,7 +60,7 @@ namespace TBAntiCheat.Telemetry
         public Dictionary<string, string> Metadata { get; set; } = [];
     }
 
-    internal sealed class EconomyEvent
+    public sealed class EconomyEvent
     {
         public string SteamID { get; set; } = string.Empty;
         public string PlayerName { get; set; } = string.Empty;
@@ -78,7 +78,7 @@ namespace TBAntiCheat.Telemetry
         public int StartAccount { get; set; }
     }
 
-    internal sealed class EconomySnapshot
+    public sealed class EconomySnapshot
     {
         public string SteamID { get; set; } = string.Empty;
         public string PlayerName { get; set; } = string.Empty;
@@ -123,5 +123,58 @@ namespace TBAntiCheat.Telemetry
             Observations.Count == 0 &&
             EconomyEvents.Count == 0 &&
             EconomySnapshots.Count == 0;
+    }
+
+    public sealed class MatchEconomyPurchaseSummary
+    {
+        public string Item { get; set; } = string.Empty;
+        public int MoneyBefore { get; set; }
+        public int MoneyAfter { get; set; }
+    }
+
+    public sealed class PlayerEconomyRoundSummary
+    {
+        public int RoundNumber { get; set; }
+        public int StartMoney { get; set; }
+        public int EndMoney { get; set; }
+        public int SpentTotal { get; set; }
+        public List<MatchEconomyPurchaseSummary> Purchases { get; set; } = [];
+    }
+
+    public sealed class PlayerEconomySummary
+    {
+        public string SteamID { get; set; } = string.Empty;
+        public string PlayerName { get; set; } = string.Empty;
+        public int Team { get; set; }
+        public List<PlayerEconomyRoundSummary> Rounds { get; set; } = [];
+    }
+
+    public sealed class TeamEconomyRoundSummary
+    {
+        public int RoundNumber { get; set; }
+        public int StartBudgetTotal { get; set; }
+        public int EndBudgetTotal { get; set; }
+        public int SpentTotal { get; set; }
+    }
+
+    public sealed class TeamEconomySummary
+    {
+        public int Team { get; set; }
+        public List<TeamEconomyRoundSummary> Rounds { get; set; } = [];
+    }
+
+    public sealed class MatchEconomySummary
+    {
+        public string PluginName { get; set; } = "TB Anti-Cheat";
+        public string PluginVersion { get; set; } = string.Empty;
+        public string MatchId { get; set; } = string.Empty;
+        public string MatchSource { get; set; } = string.Empty;
+        public string ServerId { get; set; } = string.Empty;
+        public string ServerLabel { get; set; } = string.Empty;
+        public string ServerRegion { get; set; } = string.Empty;
+        public string MapName { get; set; } = string.Empty;
+        public DateTime GeneratedAtUtc { get; set; }
+        public List<PlayerEconomySummary> Players { get; set; } = [];
+        public List<TeamEconomySummary> Teams { get; set; } = [];
     }
 }

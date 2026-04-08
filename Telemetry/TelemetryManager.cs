@@ -1,8 +1,11 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Modules.Commands;
 using TBAntiCheat.Core;
+using TBAntiCheat.Handlers;
 
 namespace TBAntiCheat.Telemetry
 {
@@ -179,9 +182,16 @@ namespace TBAntiCheat.Telemetry
         };
 
         private static readonly HttpClient httpClient = new HttpClient();
+        private static readonly TimeSpan finalMatchEconomySummaryUploadTimeout = TimeSpan.FromSeconds(15);
         private static readonly List<ObservationRecord> pendingObservations = [];
         private static readonly List<EconomyEvent> pendingEconomyEvents = [];
         private static readonly List<EconomySnapshot> pendingEconomySnapshots = [];
+
+        /// <summary>
+        /// Full-match economy history retained across live flush windows (pending lists are cleared after each upload).
+        /// </summary>
+        private static readonly List<EconomyEvent> matchEconomyEvents = [];
+        private static readonly List<EconomySnapshot> matchEconomySnapshots = [];
 
         private static PlayerTelemetryState[] playerStates = [];
         private static ACCore? plugin;
@@ -194,12 +204,25 @@ namespace TBAntiCheat.Telemetry
         private static bool uploadInProgress;
         private static bool loggedUploadDisabled;
         private static bool loggedMissingEndpoint;
+        private static TelemetryMatchSession? matchSession;
+        private static TelemetryMatchSignalTracker matchSignalTracker = new();
 
         internal static void Initialize(ACCore core)
         {
             plugin = core;
             TelemetryConfig.Initialize();
-            ResetState(string.Empty);
+            ResetState(string.Empty, preserveActiveSession: false);
+
+            CommandHandler.RegisterCommand(
+                "ouro_record_start",
+                "Starts Ouro match-scoped telemetry recording",
+                Globals.OnOuRoRecordStartCommand
+            );
+            CommandHandler.RegisterCommand(
+                "ouro_record_stop",
+                "Stops Ouro match-scoped telemetry recording",
+                Globals.OnOuRoRecordStopCommand
+            );
 
             Globals.Log("[TBAC] TelemetryManager Initialized");
         }
@@ -211,10 +234,171 @@ namespace TBAntiCheat.Telemetry
             Globals.Log("[TBAC] Telemetry config reload applied");
         }
 
+        internal static void HandleOuRoRecordStartCommand(CommandInfo command)
+        {
+            if (command.ArgCount < 2)
+            {
+                Globals.Log("[TBAC] ouro_record_start: missing base64 payload");
+                return;
+            }
+
+            StringBuilder payload = new StringBuilder();
+            for (int index = 1; index < command.ArgCount; index++)
+            {
+                if (index > 1)
+                {
+                    payload.Append(' ');
+                }
+
+                payload.Append(command.ArgByIndex(index));
+            }
+
+            if (
+                OuroTelemetryRecordCommands.TryDecodeRecordStartPayload(payload.ToString(), out TelemetryMatchSession? session, out string? error) ==
+                    false
+                || session == null
+            )
+            {
+                Globals.Log($"[TBAC] ouro_record_start: invalid payload -> {error}");
+                return;
+            }
+
+            BeginMatchRecordingSession(session);
+            Globals.Log($"[TBAC] Ouro telemetry recording started for match {session.MatchId}");
+        }
+
+        internal static void HandleOuRoRecordStopCommand(CommandInfo _)
+        {
+            TelemetryMatchSession? session = matchSession;
+            if (session == null)
+            {
+                Globals.Log("[TBAC] ouro_record_stop: no active recording session");
+                ResetState(string.Empty, preserveActiveSession: false);
+                return;
+            }
+
+            List<EconomyEvent> eventsCopy = [.. matchEconomyEvents];
+            List<EconomySnapshot> snapshotsCopy = [.. matchEconomySnapshots];
+            string mapName = currentMap;
+            string pluginVersion = plugin?.ModuleVersion ?? string.Empty;
+
+            // Disable live collection immediately so stop does not trigger any final live flushes.
+            matchSession = null;
+
+            Globals.Log("[TBAC] Ouro telemetry recording stopped");
+            UploadFinalMatchEconomySummary(
+                session,
+                eventsCopy,
+                snapshotsCopy,
+                mapName,
+                pluginVersion
+            );
+            ResetState(string.Empty, preserveActiveSession: false);
+        }
+
+        private static void BeginMatchRecordingSession(TelemetryMatchSession session)
+        {
+            ResetState(session.MapName, preserveActiveSession: false);
+            DiscardRecordingBuffers();
+            matchSession = session;
+            currentMap = session.MapName;
+            lastFlushUtc = DateTime.UtcNow;
+        }
+
+        private static void DiscardRecordingBuffers()
+        {
+            playerStates = [];
+            pendingObservations.Clear();
+            pendingEconomyEvents.Clear();
+            pendingEconomySnapshots.Clear();
+            matchEconomyEvents.Clear();
+            matchEconomySnapshots.Clear();
+            roundNumber = 0;
+            bombPlants = 0;
+            bombDefuses = 0;
+        }
+
+        private static bool ShouldEmitLiveTelemetry()
+        {
+            return TelemetryRecordingWindowPolicy.CanCollectLiveTelemetry(
+                TelemetryConfig.Get().Config.CollectionEnabled,
+                matchSession
+            );
+        }
+
+        internal static int GetOpposingRecordedRosterSize(TelemetryMatchSession? session, string steamId64)
+        {
+            if (session == null || string.IsNullOrWhiteSpace(steamId64))
+            {
+                return 0;
+            }
+
+            foreach (TelemetryRosterPlayer rosterPlayer in session.Team1)
+            {
+                if (string.Equals(rosterPlayer.SteamId64, steamId64, StringComparison.Ordinal))
+                {
+                    return session.Team2.Count;
+                }
+            }
+
+            foreach (TelemetryRosterPlayer rosterPlayer in session.Team2)
+            {
+                if (string.Equals(rosterPlayer.SteamId64, steamId64, StringComparison.Ordinal))
+                {
+                    return session.Team1.Count;
+                }
+            }
+
+            return 0;
+        }
+
+        internal static bool ShouldTreatJoinAsReconnect(int connects, int disconnects)
+        {
+            return disconnects > 0 && connects >= disconnects && connects <= disconnects + 1;
+        }
+
+        private static int CountPresentRosterMatchedHumans()
+        {
+            int count = 0;
+            foreach (PlayerData? tracked in Globals.Players)
+            {
+                if (tracked == null)
+                {
+                    continue;
+                }
+
+                if (TryResolveRosterMatchedHuman(tracked, out string _) == false)
+                {
+                    continue;
+                }
+
+                count++;
+            }
+
+            return count;
+        }
+
+        private static int GetLiveReportingIntervalSeconds()
+        {
+            TelemetryConfigData config = TelemetryConfig.Get().Config;
+            int interval = matchSession?.ReportingIntervalSeconds ?? config.ReportingIntervalSeconds;
+            return Math.Max(5, interval);
+        }
+
+        private static string GetTelemetrySteamIdForMetadata(PlayerData player)
+        {
+            if (TryResolveRosterMatchedHuman(player, out string canonicalSteamId))
+            {
+                return canonicalSteamId;
+            }
+
+            return player.SteamID;
+        }
+
         internal static void OnMapStart(string mapName)
         {
             Flush("map_start", force: true);
-            ResetState(mapName);
+            ResetState(mapName, preserveActiveSession: true);
         }
 
         internal static void OnMapEnd()
@@ -224,7 +408,7 @@ namespace TBAntiCheat.Telemetry
 
         internal static void OnRoundStart()
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
@@ -232,9 +416,17 @@ namespace TBAntiCheat.Telemetry
             roundNumber++;
         }
 
-        internal static void OnRoundEnd()
+        internal static void OnRoundEnd(int winningTeam)
         {
             CaptureEconomySnapshots("round_end");
+            if (ShouldEmitLiveTelemetry())
+            {
+                foreach (MatchSignalObservation observation in matchSignalTracker.RecordRoundResult(roundNumber, winningTeam))
+                {
+                    pendingObservations.Add(ToObservationRecord(observation));
+                }
+            }
+
             Flush("round_end", force: false);
         }
 
@@ -245,40 +437,68 @@ namespace TBAntiCheat.Telemetry
 
         internal static void OnPlayerJoined(PlayerData player)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            PlayerTelemetryState state = GetOrCreateState(player);
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? state) == false)
+            {
+                return;
+            }
+
             state.Connects++;
+            int teamNumber = player.TeamNumber;
+            if (ShouldTreatJoinAsReconnect(state.Connects, state.Disconnects))
+            {
+                matchSignalTracker.RecordReconnect(state.SteamID, roundNumber, teamNumber);
+            }
+            else
+            {
+                matchSignalTracker.UpdatePlayerTeam(state.SteamID, state.PlayerName, teamNumber);
+            }
         }
 
         internal static void OnPlayerLeft(PlayerData player)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            PlayerTelemetryState state = GetOrCreateState(player);
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? state) == false)
+            {
+                return;
+            }
+
             state.Disconnects++;
+            matchSignalTracker.RecordDisconnect(state.SteamID, roundNumber);
         }
 
         internal static void OnPlayerSpawned(PlayerData player)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            PlayerTelemetryState state = GetOrCreateState(player);
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? state) == false)
+            {
+                return;
+            }
+
             state.RoundsPlayed++;
+            matchSignalTracker.UpdatePlayerTeam(state.SteamID, state.PlayerName, player.TeamNumber);
         }
 
-        internal static void OnItemPurchase(PlayerData player, string item, int loadout, int team)
+        internal static void OnItemPurchase(PlayerData player, string item, int loadout, int _)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
+            {
+                return;
+            }
+
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? state) == false)
             {
                 return;
             }
@@ -288,7 +508,6 @@ namespace TBAntiCheat.Telemetry
                 return;
             }
 
-            PlayerTelemetryState state = GetOrCreateState(player);
             int moneySpentSinceLastRead =
                 state.LastKnownEconomyRoundNumber == roundNumber &&
                 state.LastKnownCashSpentThisRound >= 0 &&
@@ -299,12 +518,12 @@ namespace TBAntiCheat.Telemetry
             int moneyBefore = Math.Max(moneyAfter, moneyAfter + Math.Max(0, moneySpentSinceLastRead));
             string normalizedItem = NormalizeEconomyItemName(item);
 
-            pendingEconomyEvents.Add(new EconomyEvent()
+            EconomyEvent economyEvent = new EconomyEvent()
             {
-                SteamID = state.SteamID,
-                PlayerName = state.PlayerName,
-                Slot = state.Slot,
-                Team = team,
+                SteamID = sample.SteamID,
+                PlayerName = sample.PlayerName,
+                Slot = sample.Slot,
+                Team = sample.Team,
                 EventType = "purchase",
                 Item = normalizedItem,
                 Loadout = loadout,
@@ -315,7 +534,10 @@ namespace TBAntiCheat.Telemetry
                 MoneyAfter = moneyAfter,
                 CashSpentThisRound = sample.CashSpentThisRound,
                 StartAccount = sample.StartAccount
-            });
+            };
+
+            pendingEconomyEvents.Add(economyEvent);
+            matchEconomyEvents.Add(economyEvent);
 
             UpdateEconomyBaseline(state, sample);
         }
@@ -342,12 +564,16 @@ namespace TBAntiCheat.Telemetry
 
         internal static void OnWeaponFire(PlayerData player, string weapon)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            PlayerTelemetryState state = GetOrCreateState(player);
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? state) == false)
+            {
+                return;
+            }
+
             state.ShotsFired++;
 
             string normalizedWeapon = NormalizeWeaponName(weapon);
@@ -359,23 +585,31 @@ namespace TBAntiCheat.Telemetry
 
         internal static void OnBulletImpact(PlayerData player)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            PlayerTelemetryState state = GetOrCreateState(player);
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? state) == false)
+            {
+                return;
+            }
+
             state.BulletImpacts++;
         }
 
         internal static void OnPlayerBlind(PlayerData victim, PlayerData? attacker, float blindDuration)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            PlayerTelemetryState state = GetOrCreateState(victim);
+            if (TryGetRosterMatchedHumanState(victim, out PlayerTelemetryState? state) == false)
+            {
+                return;
+            }
+
             state.BlindsReceived++;
             state.BlindDurationSeconds += blindDuration;
 
@@ -385,7 +619,11 @@ namespace TBAntiCheat.Telemetry
                 state.BlindUntilUtc = blindUntilUtc;
             }
 
-            if (blindDuration >= 2.5f && attacker != null)
+            if (
+                blindDuration >= 2.5f
+                && attacker != null
+                && TryResolveRosterMatchedHuman(attacker, out string attackerSteamId)
+            )
             {
                 RecordObservation(
                     victim,
@@ -394,7 +632,7 @@ namespace TBAntiCheat.Telemetry
                     $"Blinded for {blindDuration.ToString("0.##", CultureInfo.InvariantCulture)}s",
                     metadata: new Dictionary<string, string>()
                     {
-                        ["attackerSteamId"] = attacker.SteamID,
+                        ["attackerSteamId"] = attackerSteamId,
                         ["attackerName"] = attacker.PlayerName,
                         ["blindDurationSeconds"] = blindDuration.ToString("0.##", CultureInfo.InvariantCulture)
                     }
@@ -404,85 +642,122 @@ namespace TBAntiCheat.Telemetry
 
         internal static void OnFlashbangDetonate(PlayerData player)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            GetOrCreateState(player).FlashbangsThrown++;
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? state) == false)
+            {
+                return;
+            }
+
+            state.FlashbangsThrown++;
         }
 
         internal static void OnSmokeDetonate(PlayerData player)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            GetOrCreateState(player).SmokesThrown++;
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? state) == false)
+            {
+                return;
+            }
+
+            state.SmokesThrown++;
         }
 
         internal static void OnMolotovDetonate(PlayerData player)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            GetOrCreateState(player).MolotovsThrown++;
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? state) == false)
+            {
+                return;
+            }
+
+            state.MolotovsThrown++;
         }
 
         internal static void OnPlayerFootstep(PlayerData player)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            GetOrCreateState(player).Footsteps++;
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? state) == false)
+            {
+                return;
+            }
+
+            state.Footsteps++;
         }
 
         internal static void OnPlayerSound(PlayerData player)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            GetOrCreateState(player).Sounds++;
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? state) == false)
+            {
+                return;
+            }
+
+            state.Sounds++;
         }
 
         internal static void OnBombPlanted(PlayerData player)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
+            {
+                return;
+            }
+
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? _) == false)
             {
                 return;
             }
 
             bombPlants++;
-            GetOrCreateState(player);
         }
 
         internal static void OnBombDefused(PlayerData player)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
+            {
+                return;
+            }
+
+            if (TryGetRosterMatchedHumanState(player, out PlayerTelemetryState? _) == false)
             {
                 return;
             }
 
             bombDefuses++;
-            GetOrCreateState(player);
         }
 
         internal static void OnPlayerHurt(PlayerData victim, PlayerData? attacker, int damageHealth, string weapon, int hitgroup)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
+            {
+                return;
+            }
+
+            if (TryGetRosterMatchedHumanState(victim, out PlayerTelemetryState? victimState) == false)
             {
                 return;
             }
 
             string normalizedWeapon = NormalizeWeaponName(weapon);
-            PlayerTelemetryState victimState = GetOrCreateState(victim);
             victimState.DamageTaken += Math.Max(0, damageHealth);
 
             if (IsUtilityWeapon(normalizedWeapon))
@@ -490,12 +765,15 @@ namespace TBAntiCheat.Telemetry
                 victimState.UtilityDamageTaken += Math.Max(0, damageHealth);
             }
 
-            if (attacker == null || attacker.Index == victim.Index)
+            if (
+                attacker == null
+                || attacker.Index == victim.Index
+                || TryGetRosterMatchedHumanState(attacker, out PlayerTelemetryState? attackerState) == false
+            )
             {
                 return;
             }
 
-            PlayerTelemetryState attackerState = GetOrCreateState(attacker);
             attackerState.HitsLanded++;
             attackerState.DamageDealt += Math.Max(0, damageHealth);
 
@@ -529,7 +807,7 @@ namespace TBAntiCheat.Telemetry
                         metadata: new Dictionary<string, string>()
                         {
                             ["utilityDamageDealt"] = attackerState.UtilityDamageDealt.ToString(CultureInfo.InvariantCulture),
-                            ["victimSteamId"] = victim.SteamID,
+                            ["victimSteamId"] = GetTelemetrySteamIdForMetadata(victim),
                             ["victimName"] = victim.PlayerName,
                             ["hitgroup"] = hitgroup.ToString(CultureInfo.InvariantCulture)
                         }
@@ -540,20 +818,27 @@ namespace TBAntiCheat.Telemetry
 
         internal static void OnPlayerDeath(PlayerData victim, PlayerData? attacker, string weapon, bool headshot, bool thruSmoke, int penetrated, bool attackerBlind, bool noScope, bool attackerInAir, float distance)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
 
-            PlayerTelemetryState victimState = GetOrCreateState(victim);
+            if (TryGetRosterMatchedHumanState(victim, out PlayerTelemetryState? victimState) == false)
+            {
+                return;
+            }
+
             victimState.Deaths++;
 
-            if (attacker == null || attacker.Index == victim.Index)
+            if (
+                attacker == null
+                || attacker.Index == victim.Index
+                || TryGetRosterMatchedHumanState(attacker, out PlayerTelemetryState? attackerState) == false
+            )
             {
                 return;
             }
 
-            PlayerTelemetryState attackerState = GetOrCreateState(attacker);
             attackerState.Kills++;
 
             string normalizedWeapon = NormalizeWeaponName(weapon);
@@ -586,11 +871,18 @@ namespace TBAntiCheat.Telemetry
                 killWindowCount >= 3 ||
                 (weaponKillWindowCount >= 2 && IsHighSignalWeapon(normalizedWeapon));
 
+            matchSignalTracker.RecordKill(
+                attackerState.SteamID,
+                attackerState.PlayerName,
+                attacker.TeamNumber,
+                interestingKill
+            );
+
             if (interestingKill)
             {
                 Dictionary<string, string> metadata = new Dictionary<string, string>()
                 {
-                    ["victimSteamId"] = victim.SteamID,
+                    ["victimSteamId"] = GetTelemetrySteamIdForMetadata(victim),
                     ["victimName"] = victim.PlayerName,
                     ["killWindowCount5s"] = killWindowCount.ToString(CultureInfo.InvariantCulture),
                     ["weaponKillWindowCount5s"] = weaponKillWindowCount.ToString(CultureInfo.InvariantCulture),
@@ -626,6 +918,18 @@ namespace TBAntiCheat.Telemetry
                         ["killWindowCount5s"] = killWindowCount.ToString(CultureInfo.InvariantCulture)
                     }
                 );
+
+                int opposingRosterSize = GetOpposingRecordedRosterSize(matchSession, attackerState.SteamID);
+                foreach (MatchSignalObservation signalObservation in matchSignalTracker.RegisterBurst(
+                    attackerState.SteamID,
+                    attackerState.PlayerName,
+                    roundNumber,
+                    killWindowCount,
+                    opposingRosterSize
+                ))
+                {
+                    pendingObservations.Add(ToObservationRecord(signalObservation));
+                }
             }
 
             if (weaponKillWindowCount >= 2 && IsHighSignalWeapon(normalizedWeapon))
@@ -667,7 +971,12 @@ namespace TBAntiCheat.Telemetry
 
         internal static void RecordModuleDetection(DetectionMetadata metadata)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
+            {
+                return;
+            }
+
+            if (TryResolveRosterMatchedHuman(metadata.player, out string _) == false)
             {
                 return;
             }
@@ -689,7 +998,12 @@ namespace TBAntiCheat.Telemetry
         private static void Flush(string reason, bool force)
         {
             TelemetryConfigData config = TelemetryConfig.Get().Config;
-            if (config.CollectionEnabled == false)
+            if (
+                TelemetryRecordingWindowPolicy.CanCollectLiveTelemetry(
+                    config.CollectionEnabled,
+                    matchSession
+                ) == false
+            )
             {
                 return;
             }
@@ -700,7 +1014,7 @@ namespace TBAntiCheat.Telemetry
             }
 
             DateTime nowUtc = DateTime.UtcNow;
-            if (force == false && nowUtc - lastFlushUtc < TimeSpan.FromSeconds(Math.Max(5, config.ReportingIntervalSeconds)))
+            if (force == false && nowUtc - lastFlushUtc < TimeSpan.FromSeconds(GetLiveReportingIntervalSeconds()))
             {
                 return;
             }
@@ -712,9 +1026,25 @@ namespace TBAntiCheat.Telemetry
                 return;
             }
 
-            pendingObservations.Clear();
-            pendingEconomyEvents.Clear();
-            pendingEconomySnapshots.Clear();
+            if (
+                TelemetryRecordingWindowPolicy.CanFlushLiveTelemetry(
+                    config.CollectionEnabled,
+                    matchSession,
+                    CountPresentRosterMatchedHumans()
+                ) == false
+            )
+            {
+                return;
+            }
+
+            if (BatchHasMeaningfulHumanActivity(batch) == false)
+            {
+                ClearPendingBatchData();
+                lastFlushUtc = nowUtc;
+                return;
+            }
+
+            ClearPendingBatchData();
             lastFlushUtc = nowUtc;
 
             if (config.LogBatchSummaries)
@@ -755,7 +1085,11 @@ namespace TBAntiCheat.Telemetry
                 TelemetryConfigData config = TelemetryConfig.Get().Config;
 
                 string json = JsonSerializer.Serialize(batch, jsonOptions);
-                using HttpRequestMessage request = TelemetryRequestFactory.CreateUploadRequest(config, json);
+                using HttpRequestMessage request = TelemetryRequestFactory.CreateUploadRequest(
+                    config,
+                    json,
+                    TelemetryUploadRoutes.Observations
+                );
 
                 using HttpResponseMessage response = await httpClient.SendAsync(request);
                 if (response.IsSuccessStatusCode == false)
@@ -773,13 +1107,113 @@ namespace TBAntiCheat.Telemetry
             }
         }
 
+        private static void UploadFinalMatchEconomySummary(
+            TelemetryMatchSession session,
+            IReadOnlyList<EconomyEvent> economyEvents,
+            IReadOnlyList<EconomySnapshot> economySnapshots,
+            string mapName,
+            string pluginVersion
+        )
+        {
+            UploadFinalMatchEconomySummaryAsync(
+                session,
+                economyEvents,
+                economySnapshots,
+                mapName,
+                pluginVersion
+            ).GetAwaiter().GetResult();
+        }
+
+        private static async Task UploadFinalMatchEconomySummaryAsync(
+            TelemetryMatchSession session,
+            IReadOnlyList<EconomyEvent> economyEvents,
+            IReadOnlyList<EconomySnapshot> economySnapshots,
+            string mapName,
+            string pluginVersion
+        )
+        {
+            try
+            {
+                TelemetryConfigData config = TelemetryConfig.Get().Config;
+                MatchEconomySummary summary = TelemetryEconomySummaryBuilder.Build(
+                    pluginVersion,
+                    session,
+                    economyEvents,
+                    economySnapshots
+                );
+                summary.MapName = string.IsNullOrEmpty(mapName) == false ? mapName : session.MapName;
+
+                if (config.UploadEnabled == false)
+                {
+                    if (loggedUploadDisabled == false)
+                    {
+                        Globals.Log("[TBAC] Match economy summary upload skipped (upload disabled)");
+                        loggedUploadDisabled = true;
+                    }
+
+                    return;
+                }
+
+                if (string.IsNullOrWhiteSpace(config.BaseUrl))
+                {
+                    if (loggedMissingEndpoint == false)
+                    {
+                        Globals.Log("[TBAC] Match economy summary upload skipped (BaseUrl empty)");
+                        loggedMissingEndpoint = true;
+                    }
+
+                    return;
+                }
+
+                string json = JsonSerializer.Serialize(summary, jsonOptions);
+                using HttpRequestMessage request = TelemetryRequestFactory.CreateUploadRequest(
+                    config,
+                    json,
+                    TelemetryUploadRoutes.MatchEconomySummary
+                );
+                using CancellationTokenSource cancellation = new CancellationTokenSource(
+                    finalMatchEconomySummaryUploadTimeout
+                );
+
+                using HttpResponseMessage response = await httpClient
+                    .SendAsync(request, cancellation.Token)
+                    .ConfigureAwait(false);
+                if (response.IsSuccessStatusCode == false)
+                {
+                    Globals.Log(
+                        $"[TBAC] Match economy summary upload failed -> {(int)response.StatusCode} {response.ReasonPhrase}"
+                    );
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                Globals.Log(
+                    $"[TBAC] Match economy summary upload timed out after {finalMatchEconomySummaryUploadTimeout.TotalSeconds:0}s"
+                );
+            }
+            catch (Exception e)
+            {
+                Globals.Log($"[TBAC] Match economy summary upload failed -> {e.Message}");
+            }
+        }
+
         private static TelemetryBatch BuildBatch(string reason)
         {
             TelemetryConfigData config = TelemetryConfig.Get().Config;
+            TelemetryMatchSession? session = matchSession;
+
             List<PlayerTelemetrySnapshot> players = [];
             foreach (PlayerTelemetryState? state in playerStates)
             {
-                if (state == null || state.HasActivity() == false)
+                if (state == null || state.HasActivity() == false || state.IsBot)
+                {
+                    continue;
+                }
+
+                if (
+                    session == null
+                    || TelemetryLiveIdentity.MatchesRosterSteamId64(session, state.SteamID) == false
+                )
                 {
                     continue;
                 }
@@ -791,29 +1225,54 @@ namespace TBAntiCheat.Telemetry
             List<ObservationRecord> observations = [];
             foreach (ObservationRecord observation in pendingObservations)
             {
+                if (
+                    observation.IsBot
+                    || session == null
+                    || TelemetryLiveIdentity.MatchesRosterSteamId64(session, observation.SteamID) == false
+                )
+                {
+                    continue;
+                }
+
                 observations.Add(observation);
             }
 
             List<EconomyEvent> economyEvents = [];
             foreach (EconomyEvent economyEvent in pendingEconomyEvents)
             {
+                if (
+                    session == null
+                    || TelemetryLiveIdentity.MatchesRosterSteamId64(session, economyEvent.SteamID) == false
+                )
+                {
+                    continue;
+                }
+
                 economyEvents.Add(economyEvent);
             }
 
             List<EconomySnapshot> economySnapshots = [];
             foreach (EconomySnapshot economySnapshot in pendingEconomySnapshots)
             {
+                if (
+                    session == null
+                    || TelemetryLiveIdentity.MatchesRosterSteamId64(session, economySnapshot.SteamID) == false
+                )
+                {
+                    continue;
+                }
+
                 economySnapshots.Add(economySnapshot);
             }
 
             return new TelemetryBatch()
             {
                 PluginVersion = plugin?.ModuleVersion ?? string.Empty,
-                ServerId = config.ServerId,
-                ServerLabel = config.ServerLabel,
-                ServerRegion = config.ServerRegion,
-                MatchSource = config.MatchSource,
-                MatchId = config.MatchId,
+                ServerId = session?.ServerId ?? config.ServerId,
+                ServerLabel = session?.ServerLabel ?? config.ServerLabel,
+                ServerRegion = session?.ServerRegion ?? config.ServerRegion,
+                MatchSource = session?.MatchSource ?? config.MatchSource,
+                MatchId = session?.MatchId ?? config.MatchId,
                 MapName = currentMap,
                 FlushReason = reason,
                 BatchSequence = ++batchSequence,
@@ -829,12 +1288,21 @@ namespace TBAntiCheat.Telemetry
             };
         }
 
-        private static void ResetState(string mapName)
+        private static void ResetState(string mapName, bool preserveActiveSession)
         {
+            matchSession = TelemetryRecordingWindowPolicy.ResolveActiveSessionAfterBufferReset(
+                matchSession,
+                preserveActiveSession
+            );
             playerStates = [];
-            pendingObservations.Clear();
-            pendingEconomyEvents.Clear();
-            pendingEconomySnapshots.Clear();
+            ClearPendingBatchData();
+            if (preserveActiveSession == false)
+            {
+                matchEconomyEvents.Clear();
+                matchEconomySnapshots.Clear();
+                matchSignalTracker = new();
+            }
+
             currentMap = mapName;
             roundNumber = 0;
             bombPlants = 0;
@@ -858,15 +1326,22 @@ namespace TBAntiCheat.Telemetry
             }
 
             existing.IsBot = player.IsBot;
-            existing.SteamID = player.SteamID;
             existing.PlayerName = player.PlayerName;
+            if (TryResolveRosterMatchedHuman(player, out string canonicalSteamId))
+            {
+                existing.SteamID = canonicalSteamId;
+            }
+            else
+            {
+                existing.SteamID = player.SteamID;
+            }
 
             return existing;
         }
 
         private static void CaptureEconomySnapshots(string snapshotKind, PlayerData? player = null)
         {
-            if (TelemetryConfig.Get().Config.CollectionEnabled == false)
+            if (ShouldEmitLiveTelemetry() == false)
             {
                 return;
             }
@@ -896,11 +1371,11 @@ namespace TBAntiCheat.Telemetry
             }
 
             PlayerTelemetryState state = GetOrCreateState(player);
-            pendingEconomySnapshots.Add(new EconomySnapshot()
+            EconomySnapshot economySnapshot = new EconomySnapshot()
             {
-                SteamID = state.SteamID,
-                PlayerName = state.PlayerName,
-                Slot = state.Slot,
+                SteamID = sample.SteamID,
+                PlayerName = sample.PlayerName,
+                Slot = sample.Slot,
                 Team = sample.Team,
                 SnapshotKind = snapshotKind,
                 RoundNumber = roundNumber,
@@ -911,7 +1386,10 @@ namespace TBAntiCheat.Telemetry
                 CashSpentThisRound = sample.CashSpentThisRound,
                 TotalCashSpent = sample.TotalCashSpent,
                 InventoryItems = sample.InventoryItems
-            });
+            };
+
+            pendingEconomySnapshots.Add(economySnapshot);
+            matchEconomySnapshots.Add(economySnapshot);
 
             UpdateEconomyBaseline(state, sample);
         }
@@ -919,6 +1397,11 @@ namespace TBAntiCheat.Telemetry
         private static bool TryBuildLiveEconomySample(PlayerData player, out LiveEconomySample? sample)
         {
             sample = null;
+
+            if (TryResolveRosterMatchedHuman(player, out string canonicalSteamId) == false)
+            {
+                return false;
+            }
 
             CCSPlayerController_InGameMoneyServices? moneyServices = player.GetMoneyServices();
             if (moneyServices == null)
@@ -942,7 +1425,7 @@ namespace TBAntiCheat.Telemetry
 
             sample = new LiveEconomySample()
             {
-                SteamID = player.SteamID,
+                SteamID = canonicalSteamId,
                 PlayerName = player.PlayerName,
                 Slot = player.Index,
                 Team = player.TeamNumber,
@@ -977,6 +1460,79 @@ namespace TBAntiCheat.Telemetry
             }
 
             Array.Resize(ref playerStates, playerIndex + 1);
+        }
+
+        private static bool TryResolveRosterMatchedHuman(PlayerData player, out string canonicalSteamId)
+        {
+            canonicalSteamId = string.Empty;
+
+            TelemetryMatchSession? session = matchSession;
+            if (session == null)
+            {
+                return false;
+            }
+
+            return TelemetryLiveIdentity.TryResolveCanonicalSteamId64(
+                session,
+                player.PlayerName,
+                player.SteamID64,
+                player.IsBot,
+                out canonicalSteamId
+            );
+        }
+
+        private static bool TryGetRosterMatchedHumanState(PlayerData player, out PlayerTelemetryState? state)
+        {
+            state = null;
+            if (TryResolveRosterMatchedHuman(player, out string _) == false)
+            {
+                return false;
+            }
+
+            state = GetOrCreateState(player);
+            return true;
+        }
+
+        private static void ClearPendingBatchData()
+        {
+            pendingObservations.Clear();
+            pendingEconomyEvents.Clear();
+            pendingEconomySnapshots.Clear();
+        }
+
+        private static bool BatchHasMeaningfulHumanActivity(TelemetryBatch batch)
+        {
+            List<TelemetryLiveActivityCounters> playerCounters = [];
+            foreach (PlayerTelemetrySnapshot player in batch.Players)
+            {
+                playerCounters.Add(new TelemetryLiveActivityCounters()
+                {
+                    Connects = player.Connects,
+                    Disconnects = player.Disconnects,
+                    RoundsPlayed = player.RoundsPlayed,
+                    ShotsFired = player.ShotsFired,
+                    HitsLanded = player.HitsLanded,
+                    BulletImpacts = player.BulletImpacts,
+                    DamageDealt = player.DamageDealt,
+                    DamageTaken = player.DamageTaken,
+                    UtilityDamageDealt = player.UtilityDamageDealt,
+                    UtilityDamageTaken = player.UtilityDamageTaken,
+                    Kills = player.Kills,
+                    Deaths = player.Deaths,
+                    FlashbangsThrown = player.FlashbangsThrown,
+                    SmokesThrown = player.SmokesThrown,
+                    MolotovsThrown = player.MolotovsThrown,
+                });
+            }
+
+            return TelemetryLiveBatchPolicy.HasMeaningfulHumanActivity(
+                playerCounters,
+                batch.Observations.Count,
+                batch.EconomyEvents.Count,
+                batch.EconomySnapshots.Count,
+                batch.BombPlants,
+                batch.BombDefuses
+            );
         }
 
         private static void RecordObservation(PlayerData player, string source, string kind, string summary, string weapon = "", DateTime? observedAtUtc = null, Dictionary<string, string>? metadata = null)
@@ -1121,6 +1677,56 @@ namespace TBAntiCheat.Telemetry
             {
                 values.Dequeue();
             }
+        }
+
+        internal static int ResolveSlotForMatchSignalSteamId(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId))
+            {
+                return 0;
+            }
+
+            foreach (PlayerTelemetryState? state in playerStates)
+            {
+                if (state == null)
+                {
+                    continue;
+                }
+
+                if (string.Equals(state.SteamID, steamId, StringComparison.Ordinal))
+                {
+                    return state.Slot;
+                }
+            }
+
+            return 0;
+        }
+
+        private static ObservationRecord ToObservationRecord(MatchSignalObservation observation)
+        {
+            ObservationRecord record = new ObservationRecord()
+            {
+                SteamID = observation.SteamId,
+                PlayerName = observation.PlayerName,
+                Slot = ResolveSlotForMatchSignalSteamId(observation.SteamId),
+                IsBot = false,
+                Source = observation.Source,
+                Kind = observation.Kind,
+                Summary = observation.Summary,
+                Weapon = string.Empty,
+                WeaponFamily = string.Empty,
+                RoundNumber = roundNumber,
+                ServerTick = Server.TickCount,
+                ObservedAtUtc = DateTime.UtcNow,
+                Metadata = new Dictionary<string, string>(observation.Metadata, StringComparer.Ordinal)
+            };
+
+            if (TelemetryConfig.Get().Config.LogObservationSummaries)
+            {
+                Globals.Log($"[TBAC] Observation -> {observation.PlayerName}: {observation.Source}/{observation.Kind} ({observation.Summary})");
+            }
+
+            return record;
         }
 
         private static void RecordProfileObservation(PlayerTelemetryState state, string source, string kind, string summary, string weapon = "", Dictionary<string, string>? metadata = null)
@@ -1269,6 +1875,222 @@ namespace TBAntiCheat.Telemetry
         {
             string normalized = NormalizeWeaponName(weapon);
             return normalized is "weapon_revolver" or "weapon_ssg08";
+        }
+    }
+
+    public static class OuroTelemetryRecordCommands
+    {
+        private static readonly JsonSerializerOptions recordStartJsonOptions = new JsonSerializerOptions()
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+        public static bool TryDecodeRecordStartPayload(string base64Payload, out TelemetryMatchSession? session, out string? error)
+        {
+            session = null;
+            error = null;
+
+            if (string.IsNullOrWhiteSpace(base64Payload))
+            {
+                error = "Payload is empty.";
+                return false;
+            }
+
+            try
+            {
+                byte[] jsonBytes = Convert.FromBase64String(base64Payload.Trim());
+                string json = Encoding.UTF8.GetString(jsonBytes);
+                TelemetryMatchSession? parsed = JsonSerializer.Deserialize<TelemetryMatchSession>(json, recordStartJsonOptions);
+                if (parsed == null)
+                {
+                    error = "JSON deserialized to null.";
+                    return false;
+                }
+
+                if (parsed.IsValid(out string? validationError) == false)
+                {
+                    error = validationError;
+                    return false;
+                }
+
+                session = parsed;
+                return true;
+            }
+            catch (FormatException ex)
+            {
+                error = $"Invalid base64: {ex.Message}";
+                return false;
+            }
+            catch (JsonException ex)
+            {
+                error = $"Invalid JSON: {ex.Message}";
+                return false;
+            }
+        }
+    }
+
+    public static class TelemetryLiveIdentity
+    {
+        public static bool TryResolveCanonicalSteamId64(
+            TelemetryMatchSession session,
+            string playerName,
+            bool isBot,
+            out string steamId64
+        )
+        {
+            return TryResolveCanonicalSteamId64(session, playerName, steamId64: null, isBot, out steamId64);
+        }
+
+        public static bool TryResolveCanonicalSteamId64(
+            TelemetryMatchSession session,
+            string? playerName,
+            string? steamId64,
+            bool isBot,
+            out string canonicalSteamId64
+        )
+        {
+            canonicalSteamId64 = string.Empty;
+
+            if (isBot)
+            {
+                return false;
+            }
+
+            if (MatchesRosterSteamId64(session, steamId64))
+            {
+                canonicalSteamId64 = steamId64!;
+                return true;
+            }
+
+            if (
+                string.IsNullOrWhiteSpace(playerName) ||
+                session.TryResolveRosterPlayer(playerName, out TelemetryRosterPlayer? roster) == false ||
+                roster == null
+            )
+            {
+                return false;
+            }
+
+            canonicalSteamId64 = roster.SteamId64;
+            return true;
+        }
+
+        public static bool MatchesRosterSteamId64(TelemetryMatchSession session, string? steamId64)
+        {
+            if (string.IsNullOrWhiteSpace(steamId64))
+            {
+                return false;
+            }
+
+            foreach (TelemetryRosterPlayer rosterPlayer in session.GetAllRosterPlayers())
+            {
+                if (string.Equals(rosterPlayer.SteamId64, steamId64, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    public static class TelemetryRecordingWindowPolicy
+    {
+        public static bool CanCollectLiveTelemetry(
+            bool collectionEnabled,
+            TelemetryMatchSession? activeSession
+        )
+        {
+            return collectionEnabled && activeSession != null;
+        }
+
+        public static bool CanFlushLiveTelemetry(
+            bool collectionEnabled,
+            TelemetryMatchSession? activeSession,
+            int rosterMatchedHumansPresent
+        )
+        {
+            return CanCollectLiveTelemetry(collectionEnabled, activeSession) &&
+                TelemetryLiveBatchPolicy.HasEnoughRosterMatchedHumans(rosterMatchedHumansPresent);
+        }
+
+        public static TelemetryMatchSession? ResolveActiveSessionAfterBufferReset(
+            TelemetryMatchSession? activeSession,
+            bool preserveActiveSession
+        )
+        {
+            return preserveActiveSession ? activeSession : null;
+        }
+    }
+
+    public sealed class TelemetryLiveActivityCounters
+    {
+        public int Connects { get; set; }
+        public int Disconnects { get; set; }
+        public int RoundsPlayed { get; set; }
+        public int ShotsFired { get; set; }
+        public int HitsLanded { get; set; }
+        public int BulletImpacts { get; set; }
+        public int DamageDealt { get; set; }
+        public int DamageTaken { get; set; }
+        public int UtilityDamageDealt { get; set; }
+        public int UtilityDamageTaken { get; set; }
+        public int Kills { get; set; }
+        public int Deaths { get; set; }
+        public int FlashbangsThrown { get; set; }
+        public int SmokesThrown { get; set; }
+        public int MolotovsThrown { get; set; }
+    }
+
+    public static class TelemetryLiveBatchPolicy
+    {
+        public static bool HasEnoughRosterMatchedHumans(int rosterMatchedHumansPresent)
+        {
+            return rosterMatchedHumansPresent >= 2;
+        }
+
+        public static bool HasMeaningfulHumanActivity(
+            IEnumerable<TelemetryLiveActivityCounters> players,
+            int observationCount,
+            int economyEventCount,
+            int economySnapshotCount,
+            int bombPlants,
+            int bombDefuses
+        )
+        {
+            if (
+                observationCount > 0 ||
+                economyEventCount > 0 ||
+                economySnapshotCount > 0 ||
+                bombPlants > 0 ||
+                bombDefuses > 0
+            )
+            {
+                return true;
+            }
+
+            foreach (TelemetryLiveActivityCounters player in players)
+            {
+                if (
+                    player.ShotsFired > 0 ||
+                    player.HitsLanded > 0 ||
+                    player.BulletImpacts > 0 ||
+                    player.DamageDealt > 0 ||
+                    player.DamageTaken > 0 ||
+                    player.UtilityDamageDealt > 0 ||
+                    player.UtilityDamageTaken > 0 ||
+                    player.Kills > 0 ||
+                    player.Deaths > 0 ||
+                    player.FlashbangsThrown > 0 ||
+                    player.SmokesThrown > 0 ||
+                    player.MolotovsThrown > 0
+                )
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 }

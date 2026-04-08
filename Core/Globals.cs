@@ -1,10 +1,14 @@
 ﻿using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Utils;
 using CounterStrikeSharp.API.ValveConstants.Protobuf;
 using Microsoft.Extensions.Logging;
+using System.Globalization;
+using System.Reflection;
 using TBAntiCheat.Detections;
 using TBAntiCheat.Detections.Modules;
+using TBAntiCheat.Telemetry;
 
 namespace TBAntiCheat.Core
 {
@@ -18,7 +22,37 @@ namespace TBAntiCheat.Core
 
         internal string PlayerName => Controller.PlayerName;
         internal string SteamID => Controller.AuthorizedSteamID?.SteamId2 ?? "Invalid SteamID";
+        internal string? SteamID64 => TryGetSteamId64();
         internal int TeamNumber => Controller.IsValid ? Controller.TeamNum : 0;
+
+        private string? TryGetSteamId64()
+        {
+            try
+            {
+                object? authorizedSteamId = Controller.AuthorizedSteamID;
+                if (authorizedSteamId == null)
+                {
+                    return null;
+                }
+
+                PropertyInfo? steamId64Property =
+                    authorizedSteamId.GetType().GetProperty("SteamId64") ??
+                    authorizedSteamId.GetType().GetProperty("SteamID64");
+                object? rawSteamId64 = steamId64Property?.GetValue(authorizedSteamId);
+
+                return rawSteamId64 switch
+                {
+                    ulong steamId64 when steamId64 > 0 => steamId64.ToString(CultureInfo.InvariantCulture),
+                    long steamId64 when steamId64 > 0 => steamId64.ToString(CultureInfo.InvariantCulture),
+                    string steamId64 when string.IsNullOrWhiteSpace(steamId64) == false => steamId64,
+                    _ => null
+                };
+            }
+            catch
+            {
+                return null;
+            }
+        }
 
         internal CCSWeaponBaseGun GetWeapon()
         {
@@ -175,5 +209,16 @@ namespace TBAntiCheat.Core
         {
             logger?.Log(LogLevel.Information, message);
         }
+
+        internal static void OnOuRoRecordStartCommand(CCSPlayerController? player, CommandInfo command)
+        {
+            TelemetryManager.HandleOuRoRecordStartCommand(command);
+        }
+
+        internal static void OnOuRoRecordStopCommand(CCSPlayerController? player, CommandInfo command)
+        {
+            TelemetryManager.HandleOuRoRecordStopCommand(command);
+        }
     }
 }
+

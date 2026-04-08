@@ -14,11 +14,13 @@ This fork is intentionally moving away from the original public anti-cheat shape
 - [x] Observation pipeline for suspicious signals
 - [x] Periodic batch reporting scaffolding
 - [x] Finalized `ouro-edge` API contract
+- [x] Match-scoped recording via `ouro_record_start` / `ouro_record_stop` (RCON)
 - [ ] MatchZy-aware match metadata
 
 ### Signal Families
 - [x] Module-backed suspicious observations
 - [x] Kill burst tracking
+- [x] Match-signal tracker (`TelemetryMatchSignalTracker`) — combat-profile bursts and reconnect-phase heuristics on the same live batch path as other `TelemetryManager` observations; uses `TelemetryMatchSession` rosters for opposing-team sizing
 - [x] Smoke, wallbang, blind, noscope, and airborne kill context
 - [x] Weapon-profile telemetry, including pistol-heavy and short-window high-signal weapon bursts
 - [x] Utility usage and utility damage telemetry
@@ -35,6 +37,7 @@ The plugin currently collects and batches:
 - direct economy purchase events
 - buy-phase and round-boundary economy snapshots with money and inventory
 - suspicious kill context such as smoke kills, wallbangs, flashed kills, and multi-kill bursts
+- match-level combat-profile signals from the in-process tracker (repeated burst milestones and reconnect/post-phase spike heuristics), merged into the same observation batches as module and kill telemetry
 - weapon-level counters so downstream services can score unusual weapon usage patterns
 - profile observations such as zero-utility rounds, blind-kill profiles, pistol-heavy profiles, and revolver/scout concentration
 
@@ -64,18 +67,23 @@ Runtime config files are stored under the deployed plugin directory:
 - `Configs/UntrustedAngles.json`
 - `Configs/BunnyHop.json`
 
-`Telemetry.json` now also carries server identity placeholders such as `ServerId`, `ServerLabel`, `ServerRegion`, `MatchSource`, and `MatchId`.
+`Telemetry.json` still carries defaults such as `ServerId`, `ServerLabel`, `ServerRegion`, `MatchSource`, and `MatchId`; during an active recording session the plugin overwrites these from the **`ouro_record_start`** payload (base64 JSON on the RCON command line).
 
-Production telemetry uploads use:
-- `BaseUrl: https://www.ouro.is/edge/`
-- `RelativePath: /api/cs2/observations`
-- `BearerToken` for `Authorization: Bearer <token>`
+### Telemetry lifecycle (Ouro ↔ game server)
 
-The plugin sends player and observation `SteamID` values in each batch. `ouro-edge` resolves those SteamIDs to Ouro users and their active match context during ingestion so downstream analytics can reason about both the player and the match.
+1. **`ouro_record_start <base64-json>`** — Ouro sends match id, server fields, map, optional `reportingIntervalSeconds`, and **`team1` / `team2` rosters** with `steamId64` and player names. The plugin starts a session, matches live humans to the roster by name, and uses roster **SteamID64** as the canonical `SteamID` on every emitted row. Bots are ignored and never uploaded.
+2. **Live anticheat stream** — While the session is active (and upload gating rules pass), periodic batches go to:
+   - `BaseUrl` + **`/api/cs2/observations`**
+   - `BearerToken` → `Authorization: Bearer <token>`
+   - Each batch includes non-empty **`MatchId`** and SteamID64-only identity on players, observations, and inline economy rows. `ouro-edge` stores the raw batch and resolves users / active matches from those ids.
+3. **`ouro_record_stop`** — Stops recording, builds **one** full-match economy recap from session state, uploads it to **`/api/cs2/match-economy-summary`**, then clears session state. There is **no** final flush to the live observations route on stop.
 
-Economy telemetry is sent inline in the same batch:
-- `EconomyEvents[]` contains explicit purchase rows from `item_purchase`
-- `EconomySnapshots[]` contains explicit money and inventory snapshots from buy-phase and round-boundary hooks
+Rollout caveat: the stricter `/api/cs2/observations` validation assumes this match-scoped plugin flow and the corresponding `gameCoordinator` rollout are live together. Older batches with empty `MatchId`, Steam2 ids, or bot rows will be rejected by `ouro-edge`.
+
+Economy in **live** batches (during the match):
+
+- `EconomyEvents[]` — explicit purchase rows from `item_purchase`
+- `EconomySnapshots[]` — money and inventory snapshots from buy-phase and round-boundary hooks
 - sell/refund/rebuy flows are not first-class plugin events in V1; those are inferred later on `ouro-edge`
 
 The checked-in `Config/` folder contains example files that mirror the runtime config shape.
